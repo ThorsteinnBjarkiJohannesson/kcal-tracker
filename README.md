@@ -9,6 +9,16 @@ Plain static files, no build step, no backend. All data lives in the phone's loc
 - `sw.js`: service worker (offline app shell, refreshes in the background)
 - `manifest.webmanifest`, `icons/`: home-screen install
 - `vendor/zxing.min.js`: barcode decoder for browsers without `BarcodeDetector` (iPhone). `@zxing/library` 0.21.3, Apache-2.0
+- `vendor/anthropic-sdk.mjs` (+ `otel-api.mjs`, `standardwebhooks.mjs`, `stablelib-base64.mjs`, `fast-sha256.mjs`): `@anthropic-ai/sdk` 0.135.0 browser bundle from jsDelivr, imports rewritten to the local files. Loaded only when Photo AI is used.
+
+## Photo AI
+
+"Photo AI" sends 1–3 photos (downscaled to 1568 px) to Claude and gets back structured JSON:
+a nutrition label is read exactly (and saved under its barcode if the digits are visible), a meal gets an estimate you can adjust.
+The new-product form also has a "Photo of the label" button that fills in its fields.
+
+Needs an Anthropic API key, pasted into Settings → Photo AI. It is stored in localStorage only and left out of backups.
+Model is selectable there (Opus 5.5 default, Sonnet 5.5, Haiku 5.5); Settings shows this month's spend.
 
 ## Run locally
 

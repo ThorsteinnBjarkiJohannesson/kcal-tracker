@@ -1,6 +1,6 @@
 // Offline app shell. Serves from cache instantly and refreshes the cache in the
 // background, so a new deploy shows up on the next launch.
-const CACHE = 'kcal-v1';
+const CACHE = 'kcal-v2';
 const SHELL = [
   './',
   'index.html',
@@ -8,6 +8,11 @@ const SHELL = [
   'app.js',
   'manifest.webmanifest',
   'vendor/zxing.min.js',
+  'vendor/anthropic-sdk.mjs',
+  'vendor/otel-api.mjs',
+  'vendor/standardwebhooks.mjs',
+  'vendor/stablelib-base64.mjs',
+  'vendor/fast-sha256.mjs',
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',

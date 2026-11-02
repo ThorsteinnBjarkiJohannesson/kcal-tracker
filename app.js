@@ -18,7 +18,7 @@ function store(key, val) {
 
 let products = load(KEYS.products, {});
 let entries = load(KEYS.entries, []);
-let settings = { kcalGoal: 2600, protGoal: 170, ...load(KEYS.settings, {}) };
+let settings = { kcalGoal: 2600, protGoal: 170, apiKey: '', aiModel: 'claude-opus-5-5', aiSpend: null, ...load(KEYS.settings, {}) };
 if (!load(KEYS.seeded, false)) {
   products = { ...SEED_PRODUCTS, ...products };
   store(KEYS.products, products);
@@ -135,8 +135,9 @@ function render() {
   ul.innerHTML = list.map((e) => {
     const t = new Date(e.ts);
     const amount = e.amount != null ? ` · ${fmt(e.amount)} ${e.unit}` : '';
+    const tag = e.ai ? '<span class="tag">AI</span>' : '';
     return `<li class="entry-wrap" data-id="${e.id}"><div class="entry">
-      <div class="name">${esc(e.name)}</div><div class="kcal">${fmt(e.kcal)} kcal</div>
+      <div class="name">${esc(e.name)}${tag}</div><div class="kcal">${fmt(e.kcal)} kcal</div>
       <div class="meta">${pad(t.getHours())}:${pad(t.getMinutes())}${amount}</div><div class="prot">${fmt1(e.prot)} g protein</div>
     </div></li>`;
   }).join('');
@@ -439,6 +440,7 @@ function productForm(code, p = {}, { note = '', logAfter = false, onDone = null 
   openSheet(`
     <h2>${logAfter ? 'New product' : 'Edit product'}</h2>
     <p class="sub">${note ? esc(note) + '<br>' : ''}Barcode ${esc(code)}</p>
+    <button type="button" class="btn ai" id="aiLabel">Photo of the label → fill in with AI</button>
     <form id="f">
       <label class="field"><span>Name</span><input id="n" value="${esc(p.name || '')}" autocomplete="off" required></label>
       <div class="row">
@@ -459,6 +461,30 @@ function productForm(code, p = {}, { note = '', logAfter = false, onDone = null 
     segs.forEach((b) => { b.onclick = () => setUnit(b.dataset.u); });
     setUnit(unit);
     s.querySelector('#cancel').onclick = closeSheet;
+    s.querySelector('#aiLabel').onclick = async () => {
+      const btn = s.querySelector('#aiLabel');
+      const files = await pickPhotos();
+      if (!files.length) return;
+      btn.disabled = true;
+      btn.textContent = 'Reading the label…';
+      try {
+        const photos = await Promise.all(files.map((f) => shrinkPhoto(f)));
+        const { result } = await aiAnalyze(photos, `This is the nutrition label / package of the product with barcode ${code}. Treat it as kind "label".`);
+        const set = (sel, v) => { if (v) s.querySelector(sel).value = v; };
+        set('#n', result.name);
+        if (result.kcal_per_100 > 0) {
+          s.querySelector('#k').value = fmt1(result.kcal_per_100);
+          s.querySelector('#p').value = fmt1(result.protein_per_100); // 0 g protein is a real value here
+        }
+        set('#s', result.pack_size > 0 ? fmt1(result.pack_size) : '');
+        setUnit(result.unit === 'ml' ? 'ml' : 'g');
+        btn.textContent = result.note ? `Filled in. ${result.note}` : 'Filled in. Check the numbers and save.';
+      } catch (err) {
+        btn.textContent = aiErrorText(err);
+      } finally {
+        btn.disabled = false;
+      }
+    };
     const first = [...s.querySelectorAll('input')].find((i) => !i.value);
     if (first) first.focus();
     s.querySelector('#f').onsubmit = (ev) => {
@@ -523,6 +549,14 @@ function openSettings() {
       </div>
       <div class="actions"><button class="btn primary">Save goals</button></div>
     </form>
+    <h3>Photo AI</h3>
+    <form id="aiForm">
+      <label class="field"><span>Anthropic API key</span><input id="key" type="password" autocomplete="off" placeholder="sk-ant-…" value="${esc(settings.apiKey)}"></label>
+      <label class="field"><span>Model</span><select id="model" class="field-select">${Object.entries(AI_MODELS).map(([id, m]) =>
+        `<option value="${id}"${id === settings.aiModel ? ' selected' : ''}>${m.label}</option>`).join('')}</select></label>
+      <div class="actions"><button class="btn primary">Save AI settings</button></div>
+    </form>
+    <p class="note">${aiSpendText()} The key is stored on this phone only and never goes into backups. Make one at console.anthropic.com and set a monthly spend limit there.</p>
     <h3>Saved products (${codes.length})</h3>
     <ul class="list">${codes.map((c) => {
       const p = products[c];
@@ -547,6 +581,13 @@ function openSettings() {
       if (pg > 0) settings.protGoal = r0(pg);
       saveSettings(); render(); closeSheet();
       toast('Goals saved', [], 1500);
+    };
+    s.querySelector('#aiForm').onsubmit = (ev) => {
+      ev.preventDefault();
+      settings.apiKey = s.querySelector('#key').value.trim();
+      settings.aiModel = s.querySelector('#model').value;
+      saveSettings(); closeSheet();
+      toast('AI settings saved', [], 1500);
     };
     s.querySelectorAll('[data-edit]').forEach((b) => {
       b.onclick = () => {
@@ -578,7 +619,8 @@ function productEditor(code) {
 }
 
 function exportData() {
-  const data = JSON.stringify({ app: 'kcal-tracker', version: 1, exported: new Date().toISOString(), settings, products, entries }, null, 1);
+  const { apiKey, ...safeSettings } = settings; // never put the API key in a backup file
+  const data = JSON.stringify({ app: 'kcal-tracker', version: 1, exported: new Date().toISOString(), settings: safeSettings, products, entries }, null, 1);
   const blob = new Blob([data], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -598,13 +640,268 @@ async function importData(file) {
     const ids = new Set(entries.map((e) => e.id));
     entries.push(...d.entries.filter((e) => !ids.has(e.id)));
     products = { ...products, ...(d.products || {}) };
-    if (d.settings) settings = { ...settings, ...d.settings };
+    if (d.settings) settings = { ...settings, ...d.settings, apiKey: settings.apiKey };
     saveEntries(); saveProducts(); saveSettings();
     closeSheet(); render();
     toast('Backup imported', [], 2000);
   } catch {
     toast('That file is not a Kcal backup');
   }
+}
+
+// ---------- AI photo logging ----------
+// Prices in USD per million tokens. "approx" is a typical photo: ~3,100 tokens in, ~450 out.
+const AI_MODELS = {
+  'claude-opus-5-5': { label: 'Opus 5.5 · most accurate · ~2¢ a photo', inPrice: 4, outPrice: 20, fallbacks: true },
+  'claude-sonnet-5-5': { label: 'Sonnet 5.5 · ~1¢ a photo', inPrice: 2, outPrice: 10, fallbacks: true },
+  'claude-haiku-5-5': { label: 'Haiku 5.5 · cheapest · ~0.05¢ a photo', inPrice: 0.10, outPrice: 0.50, fallbacks: false },
+};
+
+const AI_SYSTEM = `You read food photos for a calorie and protein tracker used in Iceland. Use metric units only: grams, millilitres, kcal.
+
+Decide which kind of photo this is:
+- "label": a packaged product where the nutrition table (Næringargildi / Næringarinnihald) or the pack is visible. Read the values per 100 g or per 100 ml exactly as printed. If only kJ is printed, convert with kcal = kJ / 4.184. Read the net content (e.g. "350 g", "0,33 l", "Nettóþyngd 500 g") as pack_size, converted to g or ml. Use the product name as printed on the pack, with the brand in brackets if visible. Set eaten_amount to pack_size, and the totals to the whole pack.
+- "meal": prepared food, a dish, or unpackaged food. Identify it and estimate the portion in grams from visual cues such as plate size, cutlery, hands and packaging. Always give eaten_amount, kcal_total and protein_total for what is shown, and per-100 values consistent with those totals. Name it briefly in English.
+
+Several photos show the same item, for example the front and back of a pack.
+Icelandic labels use a comma as the decimal separator ("7,3 g"); return plain numbers.
+If the digits under a barcode are legible, put them in barcode, otherwise "".
+confidence is "high" when the numbers were read from a label, otherwise "medium" or "low".
+note is one short sentence about anything uncertain (for example "portion size guessed from the plate"), or "".
+Use 0 for any number you cannot determine.`;
+
+const AI_SCHEMA = {
+  type: 'object',
+  properties: {
+    kind: { type: 'string', enum: ['label', 'meal'] },
+    name: { type: 'string' },
+    kcal_per_100: { type: 'number' },
+    protein_per_100: { type: 'number' },
+    unit: { type: 'string', enum: ['g', 'ml'] },
+    pack_size: { type: 'number' },
+    eaten_amount: { type: 'number' },
+    kcal_total: { type: 'number' },
+    protein_total: { type: 'number' },
+    barcode: { type: 'string' },
+    confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
+    note: { type: 'string' },
+  },
+  required: ['kind', 'name', 'kcal_per_100', 'protein_per_100', 'unit', 'pack_size', 'eaten_amount', 'kcal_total', 'protein_total', 'barcode', 'confidence', 'note'],
+  additionalProperties: false,
+};
+
+let sdkPromise = null;
+const loadSdk = () => (sdkPromise ||= import('./vendor/anthropic-sdk.mjs'));
+
+function pickPhotos() {
+  return new Promise((resolve) => {
+    const input = $('photoInput');
+    input.value = '';
+    input.onchange = () => resolve([...input.files].slice(0, 3));
+    input.click();
+  });
+}
+
+// Downscale to 1568 px on the long edge: keeps label text legible and the upload small.
+async function shrinkPhoto(file, maxSide = 1568) {
+  let img;
+  try {
+    img = await createImageBitmap(file, { imageOrientation: 'from-image' });
+  } catch {
+    img = await new Promise((res, rej) => {
+      const el = new Image();
+      el.onload = () => res(el);
+      el.onerror = rej;
+      el.src = URL.createObjectURL(file);
+    });
+  }
+  const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale);
+  c.height = Math.round(img.height * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  const url = c.toDataURL('image/jpeg', 0.85);
+  return { url, data: url.slice(url.indexOf(',') + 1) };
+}
+
+async function aiAnalyze(photos, hint = '', signal) {
+  if (!settings.apiKey) throw Object.assign(new Error('No API key'), { code: 'no-key' });
+  const sdk = await loadSdk();
+  const Anthropic = sdk.default;
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 90_000 });
+  const model = AI_MODELS[settings.aiModel] ? settings.aiModel : 'claude-opus-5-5';
+  const params = {
+    model,
+    max_tokens: 16000,
+    system: AI_SYSTEM,
+    output_config: { effort: 'low', format: { type: 'json_schema', schema: AI_SCHEMA } },
+    messages: [{
+      role: 'user',
+      content: [
+        ...photos.map((p) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+        { type: 'text', text: hint || 'Log what is in the photo.' },
+      ],
+    }],
+  };
+  // Opus and Sonnet: if a safety classifier wrongly declines a food photo, the API retries on a fallback model.
+  const res = AI_MODELS[model].fallbacks
+    ? await client.beta.messages.create({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, { signal })
+    : await client.messages.create(params, { signal });
+
+  if (res.stop_reason === 'refusal') throw Object.assign(new Error('Refused'), { code: 'refusal' });
+  const text = res.content.find((b) => b.type === 'text');
+  if (!text) throw Object.assign(new Error('Empty answer'), { code: 'empty' });
+  const result = JSON.parse(text.text);
+
+  const m = AI_MODELS[model];
+  const cost = (res.usage.input_tokens * m.inPrice + res.usage.output_tokens * m.outPrice) / 1e6;
+  const month = todayKey().slice(0, 7);
+  if (!settings.aiSpend || settings.aiSpend.month !== month) settings.aiSpend = { month, usd: 0, photos: 0 };
+  settings.aiSpend.usd += cost;
+  settings.aiSpend.photos += 1;
+  saveSettings();
+  return { result, cost };
+}
+
+function aiSpendText() {
+  const s = settings.aiSpend;
+  if (!s || s.month !== todayKey().slice(0, 7)) return 'No AI photos this month.';
+  return `This month: $${s.usd.toFixed(2)} for ${s.photos} photo${s.photos === 1 ? '' : 's'}.`;
+}
+
+function aiErrorText(err) {
+  if (err && err.code === 'no-key') return 'Add your Anthropic API key in Settings first.';
+  if (err && err.code === 'refusal') return 'The AI declined this photo. Try another one.';
+  if (err && err.name === 'AbortError') return 'Cancelled.';
+  const status = err && err.status;
+  if (status === 401) return 'API key rejected. Check it in Settings.';
+  if (status === 400 && /credit/i.test(err.message || '')) return 'Your Anthropic account is out of credit.';
+  if (status === 429 || status === 529) return 'The AI is busy right now. Try again in a moment.';
+  if (err && /connection|fetch|network/i.test(err.message || '')) return 'No connection. Try again when online.';
+  return 'Could not read the photo' + (status ? ` (error ${status})` : '') + '.';
+}
+
+async function photoFlow() {
+  if (!settings.apiKey) {
+    openSettings();
+    toast('Add your Anthropic API key under Photo AI to use photo logging', [], 4000);
+    return;
+  }
+  const files = await pickPhotos();
+  if (!files.length) return;
+  const photos = await Promise.all(files.map((f) => shrinkPhoto(f)));
+  const ctrl = new AbortController();
+  const thumbs = `<div class="thumbs">${photos.map((p) => `<img src="${p.url}" alt="">`).join('')}</div>`;
+  openSheet(`
+    <h2>Photo AI</h2>
+    ${thumbs}
+    <div class="ai-wait"><div class="spinner"></div><span id="aiStatus">Reading the photo…</span></div>
+    <div class="actions"><button type="button" class="btn" id="cancel">Cancel</button></div>`, (s) => {
+    s.querySelector('#cancel').onclick = () => { ctrl.abort(); closeSheet(); };
+  });
+  try {
+    const { result, cost } = await aiAnalyze(photos, '', ctrl.signal);
+    if (ctrl.signal.aborted) return;
+    aiResultSheet(result, cost, thumbs);
+  } catch (err) {
+    if (ctrl.signal.aborted) return;
+    const st = $('sheet').querySelector('#aiStatus');
+    if (st) {
+      st.textContent = aiErrorText(err);
+      $('sheet').querySelector('.spinner').remove();
+    }
+  }
+}
+
+// Review what the AI found, adjust if needed, then log.
+function aiResultSheet(r, cost, thumbs) {
+  const isLabel = r.kind === 'label';
+  let unit = r.unit === 'ml' ? 'ml' : 'g';
+  let amount = r.eaten_amount > 0 ? r.eaten_amount : (r.pack_size > 0 ? r.pack_size : 0);
+  let k100 = r.kcal_per_100;
+  let p100 = r.protein_per_100;
+  // Fill in per-100 values from totals if the model only gave totals.
+  if (!(k100 > 0) && amount > 0 && r.kcal_total > 0) {
+    k100 = (r.kcal_total / amount) * 100;
+    p100 = (r.protein_total / amount) * 100;
+  }
+  const byWeight = k100 > 0 && amount > 0;
+  const barcode = normalizeCode(r.barcode || '');
+  const saveCode = isLabel && validEan(barcode) ? barcode : null;
+  const confClass = r.confidence === 'low' ? ' class="conf-low"' : '';
+
+  openSheet(`
+    <h2>${isLabel ? 'Label read' : 'Meal estimate'}</h2>
+    ${thumbs}
+    <p class="ai-meta"><span${confClass}>${esc(r.confidence)} confidence</span>${r.note ? ' · ' + esc(r.note) : ''} · cost $${cost.toFixed(4)}</p>
+    <form id="f">
+      <label class="field"><span>Name</span><input id="n" value="${esc(r.name)}" autocomplete="off"></label>
+      ${byWeight ? `
+      <div class="row">
+        <label class="field"><span>kcal per 100</span><input id="k" inputmode="decimal" value="${fmt1(k100)}"></label>
+        <label class="field"><span>Protein per 100 (g)</span><input id="p" inputmode="decimal" value="${fmt1(p100)}"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>${isLabel ? 'Pack size / eaten' : 'Amount eaten'}</span><input id="a" inputmode="decimal" value="${fmt1(amount)}"></label>
+        <label class="field"><span>Unit</span><div class="seg"><button type="button" data-u="g">g</button><button type="button" data-u="ml">ml</button></div></label>
+      </div>
+      <div class="portions"><button type="button" data-f="0.5">½</button><button type="button" data-f="0.75">¾</button><button type="button" data-f="1.25">+25%</button><button type="button" data-f="2">×2</button></div>
+      <div class="preview" id="pv"></div>` : `
+      <div class="row">
+        <label class="field"><span>kcal</span><input id="kt" inputmode="decimal" value="${r0(r.kcal_total)}"></label>
+        <label class="field"><span>Protein (g)</span><input id="pt" inputmode="decimal" value="${fmt1(r.protein_total)}"></label>
+      </div>`}
+      ${saveCode ? `<p class="note" style="margin:0 0 12px">Saved under barcode ${saveCode}, so scanning it next time is instant.</p>` : ''}
+      <div class="actions">
+        <button type="button" class="btn" id="cancel">Cancel</button>
+        <button class="btn primary">Log it</button>
+      </div>
+    </form>`, (s) => {
+    s.querySelector('#cancel').onclick = closeSheet;
+    const val = (sel) => num(s.querySelector(sel).value);
+    if (byWeight) {
+      const segs = s.querySelectorAll('.seg button');
+      const setUnit = (u) => { unit = u; segs.forEach((b) => b.classList.toggle('on', b.dataset.u === u)); };
+      segs.forEach((b) => { b.onclick = () => setUnit(b.dataset.u); });
+      setUnit(unit);
+      const update = () => {
+        const m = macros(val('#k') || 0, val('#p') || 0, val('#a') || 0);
+        s.querySelector('#pv').innerHTML = `<b>${fmt(m.kcal)}</b> kcal · <b class="p">${fmt1(m.prot)}</b> <span class="p">g protein</span>`;
+      };
+      s.querySelectorAll('#k, #p, #a').forEach((i) => { i.oninput = update; });
+      s.querySelectorAll('.portions button').forEach((b) => {
+        b.onclick = () => { s.querySelector('#a').value = fmt1((val('#a') || 0) * +b.dataset.f); update(); };
+      });
+      update();
+    }
+    s.querySelector('#f').onsubmit = (ev) => {
+      ev.preventDefault();
+      const name = s.querySelector('#n').value.trim() || (isLabel ? 'Product' : 'Meal');
+      if (byWeight) {
+        const kcal100 = val('#k'), prot100 = val('#p') ?? 0, amt = val('#a');
+        if (!(kcal100 >= 0) || !(amt > 0)) return;
+        const size = isLabel && r.pack_size > 0 ? r.pack_size : amt;
+        if (saveCode) {
+          products[saveCode] = { name, kcal100, prot100, size, unit, source: 'ai' };
+          saveProducts();
+        }
+        closeSheet();
+        addEntry({
+          id: uid(), ts: tsForViewedDay(), name, barcode: saveCode, ai: true,
+          amount: r1(amt), unit, size, kcal100, prot100, ...macros(kcal100, prot100, amt),
+        });
+      } else {
+        const kcal = val('#kt');
+        if (kcal == null) return;
+        const prot = val('#pt') || 0;
+        closeSheet();
+        addEntry({
+          id: uid(), ts: tsForViewedDay(), name, barcode: null, ai: true,
+          amount: null, unit: null, kcal100: null, prot100: null, kcal: r0(kcal), prot: r1(prot),
+        });
+      }
+    };
+  });
 }
 
 // ---------- swipe to delete / tap to edit ----------
@@ -819,6 +1116,7 @@ $('manualCode').onclick = () => {
 $('scan').onclick = openScanner;
 $('closeScanner').onclick = closeScanner;
 $('quickAdd').onclick = quickAdd;
+$('photo').onclick = photoFlow;
 $('openSettings').onclick = openSettings;
 $('prevDay').onclick = () => { viewDay = addDays(viewDay, -1); render(); };
 $('nextDay').onclick = () => { viewDay = addDays(viewDay, 1); render(); };
