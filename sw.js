@@ -1,6 +1,6 @@
 // Offline app shell. Serves from cache instantly and refreshes the cache in the
 // background, so a new deploy shows up on the next launch.
-const CACHE = 'kcal-v2';
+const CACHE = 'kcal-v3';
 const SHELL = [
   './',
   'index.html',
@@ -19,7 +19,13 @@ const SHELL = [
 ];
 
 self.addEventListener('install', (e) => {
-  e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
+  // cache: 'reload' skips the browser's HTTP cache (GitHub Pages sends max-age=600),
+  // so a new version never gets installed with stale copies of its files.
+  e.waitUntil(
+    caches.open(CACHE)
+      .then((c) => c.addAll(SHELL.map((url) => new Request(url, { cache: 'reload' }))))
+      .then(() => self.skipWaiting()),
+  );
 });
 
 self.addEventListener('activate', (e) => {
@@ -36,7 +42,7 @@ self.addEventListener('fetch', (e) => {
   e.respondWith(
     caches.open(CACHE).then(async (cache) => {
       const cached = await cache.match(e.request, { ignoreSearch: true });
-      const fresh = fetch(e.request)
+      const fresh = fetch(e.request.url, { cache: 'no-cache' })
         .then((res) => { if (res.ok) cache.put(e.request, res.clone()); return res; })
         .catch(() => cached);
       return cached || fresh;
