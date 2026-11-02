@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Kcal</title>
+<meta name="description" content="Fast calorie and protein tracker with barcode scanning">
+<meta name="theme-color" content="#101418" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f4f5f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Kcal">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png" type="image/png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <button class="icon-btn" id="prevDay" aria-label="Previous day">&#8249;</button>
+  <button class="day-title" id="dayTitle" aria-label="Go to today"></button>
+  <button class="icon-btn" id="nextDay" aria-label="Next day">&#8250;</button>
+  <button class="icon-btn gear" id="openSettings" aria-label="Settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+  </button>
+</header>
+
+<main>
+  <section class="summary">
+    <div class="metric">
+      <div class="metric-row">
+        <span class="big" id="kcalTotal">0</span><span class="unit">kcal</span>
+        <span class="left" id="kcalLeft"></span>
+      </div>
+      <div class="bar"><div class="fill" id="kcalBar"></div></div>
+      <div class="goal" id="kcalGoal"></div>
+    </div>
+    <div class="metric">
+      <div class="metric-row">
+        <span class="big" id="protTotal">0</span><span class="unit">g protein</span>
+        <span class="left" id="protLeft"></span>
+      </div>
+      <div class="bar prot"><div class="fill" id="protBar"></div></div>
+      <div class="goal" id="protGoal"></div>
+    </div>
+  </section>
+
+  <div class="past-banner" id="pastBanner" hidden>
+    Adding to <b id="pastDayName"></b> <button id="backToToday">Back to today</button>
+  </div>
+
+  <section class="recent" id="recentWrap" hidden>
+    <div class="chips" id="recent"></div>
+  </section>
+
+  <ul class="entries" id="entries"></ul>
+  <p class="empty" id="empty">Nothing logged yet. Tap <b>Scan</b> to start.</p>
+</main>
+
+<nav class="bottom">
+  <button class="btn-secondary" id="quickAdd">+ Quick add</button>
+  <button class="btn-scan" id="scan">
+    <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8v8M10 8v8M13 8v8M16.5 8v8"/></svg>
+    Scan
+  </button>
+</nav>
+
+<div class="toast" id="toast" role="status" aria-live="polite" hidden>
+  <div class="toast-msg" id="toastMsg"></div>
+  <div class="toast-actions" id="toastActions"></div>
+</div>
+
+<div class="scanner" id="scanner" hidden>
+  <video id="video" playsinline muted autoplay></video>
+  <div class="scan-frame"><div class="scan-line"></div></div>
+  <div class="scan-top">
+    <button class="icon-btn light" id="closeScanner" aria-label="Close">&#10005;</button>
+    <span class="scan-status" id="scanStatus">Starting camera…</span>
+    <button class="icon-btn light" id="torch" aria-label="Flashlight" hidden>
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+    </button>
+  </div>
+  <div class="scan-bottom">
+    <button class="btn-ghost" id="manualCode">Type barcode</button>
+  </div>
+</div>
+
+<div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
