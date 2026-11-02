@@ -19,6 +19,7 @@ The new-product form also has a "Photo of the label" button that fills in its fi
 
 Needs an Anthropic API key, pasted into Settings → Photo AI. It is stored in localStorage only and left out of backups.
 Model is selectable there (Opus 5.5 default, Sonnet 5.5, Haiku 5.5); Settings shows this month's spend.
+With "Search the web" on (default), Claude may look up official nutrition pages for branded or restaurant food ($0.01 per search, max 3 per photo). The answer comes back through a strict `log_food` tool call because web search citations cannot be combined with `output_config.format`; if the API rejects search, the app retries once without it.
 
 ## Run locally
 

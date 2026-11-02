@@ -18,7 +18,7 @@ function store(key, val) {
 
 let products = load(KEYS.products, {});
 let entries = load(KEYS.entries, []);
-let settings = { kcalGoal: 2600, protGoal: 170, apiKey: '', aiModel: 'claude-opus-5-5', aiSpend: null, ...load(KEYS.settings, {}) };
+let settings = { kcalGoal: 2600, protGoal: 170, apiKey: '', aiModel: 'claude-opus-5-5', aiSearch: true, aiSpend: null, ...load(KEYS.settings, {}) };
 if (!load(KEYS.seeded, false)) {
   products = { ...SEED_PRODUCTS, ...products };
   store(KEYS.products, products);
@@ -469,7 +469,7 @@ function productForm(code, p = {}, { note = '', logAfter = false, onDone = null 
       btn.textContent = 'Reading the label…';
       try {
         const photos = await Promise.all(files.map((f) => shrinkPhoto(f)));
-        const { result } = await aiAnalyze(photos, `This is the nutrition label / package of the product with barcode ${code}. Treat it as kind "label".`);
+        const { result } = await aiAnalyze(photos, `This is the nutrition label / package of the product with barcode ${code}. Treat it as kind "label".`, undefined, { search: false });
         const set = (sel, v) => { if (v) s.querySelector(sel).value = v; };
         set('#n', result.name);
         if (result.kcal_per_100 > 0) {
@@ -554,6 +554,7 @@ function openSettings() {
       <label class="field"><span>Anthropic API key</span><input id="key" type="password" autocomplete="off" placeholder="sk-ant-…" value="${esc(settings.apiKey)}"></label>
       <label class="field"><span>Model</span><select id="model" class="field-select">${Object.entries(AI_MODELS).map(([id, m]) =>
         `<option value="${id}"${id === settings.aiModel ? ' selected' : ''}>${m.label}</option>`).join('')}</select></label>
+      <label class="check"><input type="checkbox" id="search"${settings.aiSearch !== false ? ' checked' : ''}> Search the web for branded and restaurant food (1¢ a search, plus the pages it reads)</label>
       <div class="actions"><button class="btn primary">Save AI settings</button></div>
     </form>
     <p class="note">${aiSpendText()} The key is stored on this phone only and never goes into backups. Make one at console.anthropic.com and set a monthly spend limit there.</p>
@@ -586,6 +587,7 @@ function openSettings() {
       ev.preventDefault();
       settings.apiKey = s.querySelector('#key').value.trim();
       settings.aiModel = s.querySelector('#model').value;
+      settings.aiSearch = s.querySelector('#search').checked;
       saveSettings(); closeSheet();
       toast('AI settings saved', [], 1500);
     };
@@ -650,12 +652,14 @@ async function importData(file) {
 }
 
 // ---------- AI photo logging ----------
-// Prices in USD per million tokens. "approx" is a typical photo: ~3,100 tokens in, ~450 out.
+// Prices in USD per million tokens; a web search costs $0.01 on top.
+// The per-photo figures assume ~3,100 tokens in and ~450 out, with no search.
 const AI_MODELS = {
-  'claude-opus-5-5': { label: 'Opus 5.5 · most accurate · ~2¢ a photo', inPrice: 4, outPrice: 20, fallbacks: true },
-  'claude-sonnet-5-5': { label: 'Sonnet 5.5 · ~1¢ a photo', inPrice: 2, outPrice: 10, fallbacks: true },
-  'claude-haiku-5-5': { label: 'Haiku 5.5 · cheapest · ~0.05¢ a photo', inPrice: 0.10, outPrice: 0.50, fallbacks: false },
+  'claude-opus-5-5': { label: 'Opus 5.5 · most accurate · ~2¢ a photo', inPrice: 4, outPrice: 20, fallbacks: true, search: 'web_search_20260209' },
+  'claude-sonnet-5-5': { label: 'Sonnet 5.5 · ~1¢ a photo', inPrice: 2, outPrice: 10, fallbacks: true, search: 'web_search_20260209' },
+  'claude-haiku-5-5': { label: 'Haiku 5.5 · cheapest · ~0.05¢ a photo', inPrice: 0.10, outPrice: 0.50, fallbacks: false, search: 'web_search_20250305' },
 };
+const SEARCH_PRICE = 0.01;
 
 const AI_SYSTEM = `You read food photos for a calorie and protein tracker used in Iceland. Use metric units only: grams, millilitres, kcal.
 
@@ -666,9 +670,15 @@ Decide which kind of photo this is:
 Several photos show the same item, for example the front and back of a pack.
 Icelandic labels use a comma as the decimal separator ("7,3 g"); return plain numbers.
 If the digits under a barcode are legible, put them in barcode, otherwise "".
-confidence is "high" when the numbers were read from a label, otherwise "medium" or "low".
+confidence is "high" when the numbers were read from a label or an official source, otherwise "medium" or "low".
 note is one short sentence about anything uncertain (for example "portion size guessed from the plate"), or "".
-Use 0 for any number you cannot determine.`;
+Use 0 for any number you cannot determine.
+
+If the web_search tool is available: when the photo shows an identifiable branded product or an item from a restaurant or chain, and no nutrition table is legible in the photo, search for its official nutrition information (the manufacturer's site, the chain's nutrition page, Icelandic store listings) and use those values. Prefer official sources over user-submitted calorie databases. Do not search when a nutrition table is legible in the photo, or for generic or home-cooked food; estimate those directly. The portion in the photo still decides eaten_amount.
+
+Finish by calling the log_food tool exactly once with the result. source is "label" when the numbers come from the photo, "web" when they come from a web page (put that page's URL in source_url), and "estimate" otherwise; source_url is "" unless source is "web".`;
+
+const SEARCH_LOCATION = { type: 'approximate', country: 'IS', timezone: 'Atlantic/Reykjavik' };
 
 const AI_SCHEMA = {
   type: 'object',
@@ -685,9 +695,20 @@ const AI_SCHEMA = {
     barcode: { type: 'string' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
     note: { type: 'string' },
+    source: { type: 'string', enum: ['label', 'web', 'estimate'] },
+    source_url: { type: 'string' },
   },
-  required: ['kind', 'name', 'kcal_per_100', 'protein_per_100', 'unit', 'pack_size', 'eaten_amount', 'kcal_total', 'protein_total', 'barcode', 'confidence', 'note'],
+  required: ['kind', 'name', 'kcal_per_100', 'protein_per_100', 'unit', 'pack_size', 'eaten_amount', 'kcal_total', 'protein_total', 'barcode', 'confidence', 'note', 'source', 'source_url'],
   additionalProperties: false,
+};
+
+// The answer comes back as a strict tool call: web search always adds citations,
+// and citations can't be combined with output_config.format.
+const LOG_TOOL = {
+  name: 'log_food',
+  description: 'Records the nutrition result for the photo. Call it exactly once, as the final step.',
+  strict: true,
+  input_schema: AI_SCHEMA,
 };
 
 let sdkPromise = null;
@@ -724,43 +745,69 @@ async function shrinkPhoto(file, maxSide = 1568) {
   return { url, data: url.slice(url.indexOf(',') + 1) };
 }
 
-async function aiAnalyze(photos, hint = '', signal) {
+async function aiAnalyze(photos, hint = '', signal, { search = true } = {}) {
   if (!settings.apiKey) throw Object.assign(new Error('No API key'), { code: 'no-key' });
   const sdk = await loadSdk();
   const Anthropic = sdk.default;
-  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 90_000 });
+  const client = new Anthropic({ apiKey: settings.apiKey, dangerouslyAllowBrowser: true, maxRetries: 1, timeout: 120_000 });
   const model = AI_MODELS[settings.aiModel] ? settings.aiModel : 'claude-opus-5-5';
-  const params = {
-    model,
-    max_tokens: 16000,
-    system: AI_SYSTEM,
-    output_config: { effort: 'low', format: { type: 'json_schema', schema: AI_SCHEMA } },
-    messages: [{
-      role: 'user',
-      content: [
-        ...photos.map((p) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
-        { type: 'text', text: hint || 'Log what is in the photo.' },
-      ],
-    }],
+  const m = AI_MODELS[model];
+  const content = [
+    ...photos.map((p) => ({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: p.data } })),
+    { type: 'text', text: hint || 'Log what is in the photo.' },
+  ];
+  const usage = { input: 0, output: 0, searches: 0 };
+
+  const run = async (withSearch) => {
+    const tools = [LOG_TOOL];
+    if (withSearch) tools.unshift({ type: m.search, name: 'web_search', max_uses: 3, user_location: SEARCH_LOCATION });
+    const messages = [{ role: 'user', content }];
+    let res;
+    // A search turn can pause on the server; sending the paused turn back resumes it.
+    for (let i = 0; i < 4; i++) {
+      const params = { model, max_tokens: 16000, system: AI_SYSTEM, output_config: { effort: 'low' }, tools, messages };
+      // Opus and Sonnet: if a safety classifier wrongly declines a food photo, the API retries on a fallback model.
+      res = m.fallbacks
+        ? await client.beta.messages.create({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, { signal })
+        : await client.messages.create(params, { signal });
+      usage.input += res.usage.input_tokens || 0;
+      usage.output += res.usage.output_tokens || 0;
+      usage.searches += (res.usage.server_tool_use && res.usage.server_tool_use.web_search_requests) || 0;
+      if (res.stop_reason !== 'pause_turn') break;
+      messages.push({ role: 'assistant', content: res.content });
+    }
+    return res;
   };
-  // Opus and Sonnet: if a safety classifier wrongly declines a food photo, the API retries on a fallback model.
-  const res = AI_MODELS[model].fallbacks
-    ? await client.beta.messages.create({ ...params, betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' }, { signal })
-    : await client.messages.create(params, { signal });
+
+  let res;
+  const wantSearch = search && settings.aiSearch !== false;
+  try {
+    res = await run(wantSearch);
+  } catch (err) {
+    // If the API won't combine search with the answer tool, still answer from the photo alone.
+    if (!wantSearch || err.status !== 400 || /credit/i.test(err.message || '')) throw err;
+    res = await run(false);
+  }
 
   if (res.stop_reason === 'refusal') throw Object.assign(new Error('Refused'), { code: 'refusal' });
-  const text = res.content.find((b) => b.type === 'text');
-  if (!text) throw Object.assign(new Error('Empty answer'), { code: 'empty' });
-  const result = JSON.parse(text.text);
+  const call = res.content.find((b) => b.type === 'tool_use' && b.name === 'log_food');
+  if (!call) throw Object.assign(new Error('No answer'), { code: 'empty' });
+  const result = typeof call.input === 'string' ? JSON.parse(call.input) : call.input;
 
-  const m = AI_MODELS[model];
-  const cost = (res.usage.input_tokens * m.inPrice + res.usage.output_tokens * m.outPrice) / 1e6;
+  const sources = [];
+  for (const b of res.content) {
+    if (b.type === 'web_search_tool_result' && Array.isArray(b.content)) {
+      for (const r of b.content) if (r.url && !sources.some((s) => s.url === r.url)) sources.push({ url: r.url, title: r.title || r.url });
+    }
+  }
+
+  const cost = (usage.input * m.inPrice + usage.output * m.outPrice) / 1e6 + usage.searches * SEARCH_PRICE;
   const month = todayKey().slice(0, 7);
   if (!settings.aiSpend || settings.aiSpend.month !== month) settings.aiSpend = { month, usd: 0, photos: 0 };
   settings.aiSpend.usd += cost;
   settings.aiSpend.photos += 1;
   saveSettings();
-  return { result, cost };
+  return { result, cost, searches: usage.searches, sources };
 }
 
 function aiSpendText() {
@@ -795,14 +842,14 @@ async function photoFlow() {
   openSheet(`
     <h2>Photo AI</h2>
     ${thumbs}
-    <div class="ai-wait"><div class="spinner"></div><span id="aiStatus">Reading the photo…</span></div>
+    <div class="ai-wait"><div class="spinner"></div><span id="aiStatus">Reading the photo…${settings.aiSearch !== false ? ' It may search the web, which takes longer.' : ''}</span></div>
     <div class="actions"><button type="button" class="btn" id="cancel">Cancel</button></div>`, (s) => {
     s.querySelector('#cancel').onclick = () => { ctrl.abort(); closeSheet(); };
   });
   try {
-    const { result, cost } = await aiAnalyze(photos, '', ctrl.signal);
+    const res = await aiAnalyze(photos, '', ctrl.signal);
     if (ctrl.signal.aborted) return;
-    aiResultSheet(result, cost, thumbs);
+    aiResultSheet(res, thumbs);
   } catch (err) {
     if (ctrl.signal.aborted) return;
     const st = $('sheet').querySelector('#aiStatus');
@@ -813,8 +860,18 @@ async function photoFlow() {
   }
 }
 
+function sourceText(r, sources) {
+  if (r.source === 'label') return 'read from the label';
+  if (r.source !== 'web') return 'estimated from the photo';
+  let url = /^https?:\/\//.test(r.source_url) ? r.source_url : (sources[0] && sources[0].url);
+  if (!url) return 'from the web';
+  let host = url;
+  try { host = new URL(url).hostname.replace(/^www\./, ''); } catch {}
+  return `from <a href="${esc(url)}" target="_blank" rel="noopener">${esc(host)}</a>`;
+}
+
 // Review what the AI found, adjust if needed, then log.
-function aiResultSheet(r, cost, thumbs) {
+function aiResultSheet({ result: r, cost, searches, sources }, thumbs) {
   const isLabel = r.kind === 'label';
   let unit = r.unit === 'ml' ? 'ml' : 'g';
   let amount = r.eaten_amount > 0 ? r.eaten_amount : (r.pack_size > 0 ? r.pack_size : 0);
@@ -833,7 +890,8 @@ function aiResultSheet(r, cost, thumbs) {
   openSheet(`
     <h2>${isLabel ? 'Label read' : 'Meal estimate'}</h2>
     ${thumbs}
-    <p class="ai-meta"><span${confClass}>${esc(r.confidence)} confidence</span>${r.note ? ' · ' + esc(r.note) : ''} · cost $${cost.toFixed(4)}</p>
+    <p class="ai-meta"><span${confClass}>${esc(r.confidence)} confidence</span> · ${sourceText(r, sources)}${r.note ? ' · ' + esc(r.note) : ''}<br>
+      cost $${cost.toFixed(4)}${searches ? ` (${searches} web search${searches === 1 ? '' : 'es'})` : ''}</p>
     <form id="f">
       <label class="field"><span>Name</span><input id="n" value="${esc(r.name)}" autocomplete="off"></label>
       ${byWeight ? `

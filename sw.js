@@ -1,6 +1,6 @@
 // Offline app shell. Serves from cache instantly and refreshes the cache in the
 // background, so a new deploy shows up on the next launch.
-const CACHE = 'kcal-v3';
+const CACHE = 'kcal-v4';
 const SHELL = [
   './',
   'index.html',
